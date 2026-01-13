@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>簡單模式：單字解謎</title>
+    <link rel="stylesheet" href="/static/easy_mode.css">
+    <style>
+        .modal-body-flex {
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            gap: 20px;
+            margin-top: 15px;
+        }
+        .image-column {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .image-column img {
+            width: 100%;
+            height: auto;
+            max-height: 450px;
+            object-fit: contain;
+        }
+        #ai-loading-placeholder {
+            color: black;
+            font-weight: bold; 
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <audio id="easy-bgm" src="/static/music_easy.mp3" loop autoplay></audio>
+
+    <div class="bg-layer"></div>
+    <a href="/" alt="go-back">
+        <button id="back-btn" class="back-btn">回上頁</button>
+    </a>
+
+    <div id="level-indicator">
+        <div class="level-circle active">1</div>
+        <div class="level-circle">2</div>
+        <div class="level-circle">3</div>
+        <div class="level-circle">4</div>
+        <div class="level-circle">5</div>
+        <div class="level-circle">6</div>
+        <div class="level-circle">7</div>
+        <div class="level-circle">8</div>
+        <div class="level-circle">9</div>
+        <div class="level-circle">10</div>
+        <div class="level-circle">11</div>
+        <div class="level-circle">12</div>
+    </div>
+
+    <div id="game-box" class="game-box">
+        <div id="left-side">
+            <img id="vague-image" src="" alt="vague-image">
+            <p>猜猜看圖片中有什麼？</p>
+        </div>
+        <div id="right-side">
+            <div id="tip-boxes">
+                <div class="tip-box" id="tip1"></div>
+                <div class="tip-box" id="tip2"></div>
+                <div class="tip-box" id="tip3"></div>
+            </div>
+            <div id="answer-boxes">
+                <div class="answer-box" id="answer1"></div>
+                <div class="answer-box" id="answer2"></div>
+                <div class="answer-box" id="answer3"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="sentence" id="sentence">
+        <p>請用選擇的三個單字造一個句子</p>
+        <input type="text" id="sentence-input" placeholder="在這裡輸入您的英文句子..." class="sentence-input">
+        <button class="confirm-btn hidden">確認</button>
+    </div>
+
+    <div id="answer-area" class="answer-area">
+        <div class="word-card">
+            <div class="cards"></div>
+            <button class="submit-btn hidden">對答案</button>
+        </div> 
+        <div class="feed-back">
+            <div id="feedback-container"></div>
+        </div> 
+    </div>
+
+    <div id="image-modal" class="modal-backdrop">
+        <div class="modal-content">
+            <div class="modal-body">
+                <div class="modal-body-flex">
+                    <div class="image-column">
+                        <h3>關卡原始圖片：</h3>
+                        <img id="generated-image" src="" alt="Original Image">
+                    </div>
+                    <div class="image-column">
+                        <h3>您用句子生成的圖片如下：</h3>
+                        <div id="ai-loading-placeholder">圖片生成中...</div>
+                        <img id="ai-generated-image" src="" alt="AI Generated Image" class="hidden">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="next-level-btn">下一關</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentLevel = 1; 
+        let levelDataCache = []; 
+        let currentSentencePrompt = ""; 
+        let feedbackCount = 0; // 新增：追蹤 AI 回饋次數
+
+        const words = [
+            "universe","crocodile","jellyfish","farm","cow","chicken","turtle","umbrella","raining",
+            "pigeon","penguin","fence","waterfall","elephant","bird","bunny","desert","wolf","rock",
+            "zebra","lion","boat","ocean","whale","cat","moon","night","koala","ice","grass","puppy",
+            "parrot","forest","snow","rose","duck","tiger","horse","goose","mountain","dessert","fish"
+        ];
+        
+        function typeEffect(elementId, text, delay = 30, callback = null) {
+            const container = document.getElementById(elementId);
+            container.innerHTML = '';
+            const outputElement = document.createElement('pre');
+            outputElement.style.whiteSpace = 'pre-wrap';
+            container.appendChild(outputElement);
+            
+            let i = 0;
+            const feedBackBox = document.querySelector(".feed-back"); 
+            function typing() {
+                if (i < text.length) {
+                    const char = text.charAt(i);
+                    if (char === '\n') { outputElement.innerHTML += '<br>'; } 
+                    else { outputElement.textContent += char; }
+                    i++;
+                    setTimeout(typing, delay);
+                    if(feedBackBox) feedBackBox.scrollTop = feedBackBox.scrollHeight;
+                } else if (callback) { 
+                    callback(); 
+                }
+            }
+            typing();
+        }
+
+        async function showModal() {
+            const levelData = levelDataCache.find(item => item.level === currentLevel);
+            const userSentence = document.getElementById("sentence-input").value.trim();
+            
+            // 獲取目前格子裡的三個單字（用於後端計算單字分數）
+            const selectedWords = [
+                document.getElementById("answer1").textContent.trim(),
+                document.getElementById("answer2").textContent.trim(),
+                document.getElementById("answer3").textContent.trim()
+            ];
+
+            document.getElementById("generated-image").src = levelData ? levelData.image_origin : "";
+            const loading = document.getElementById("ai-loading-placeholder");
+            const aiImg = document.getElementById("ai-generated-image");
+            
+            loading.classList.remove("hidden");
+            loading.textContent = "正在評分並生成圖片..."; // 稍微修改提示語
+            aiImg.classList.add("hidden");
+            aiImg.src = ""; 
+            document.getElementById("image-modal").classList.add("visible");
+
+            try {
+                const response = await fetch("/api/generate_image", {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        user_sentence: userSentence,
+                        level: currentLevel,        // 補上這行
+                        correct_words: selectedWords // 補上這行
+                    })
+                });
+                
+                if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+                const result = await response.json();
+                const imgSource = result.image_data || result.image;
+
+                if (imgSource) {
+                    aiImg.src = imgSource.startsWith('data:') ? imgSource : `data:image/png;base64,${imgSource}`;
+                    loading.classList.add("hidden");
+                    aiImg.classList.remove("hidden");
+                } else {
+                    loading.textContent = "生成失敗：格式錯誤。";
+                }
+            } catch (e) {
+                loading.textContent = "評分與生圖連線異常。";
+            }
+        }
+
+        function loadLevel(level, isReplay = false) {
+            if (level > levelDataCache.length) { level = 1; }
+            if (level < 1) { level = 1; }
+            const levelData = levelDataCache.find(item => item.level === level);
+            if (!levelData) return;
+            
+            currentLevel = level;
+            feedbackCount = 0; // 重置回饋次數
+            
+            document.querySelectorAll(".level-circle").forEach(c => {
+                c.classList.remove("active");
+                if (parseInt(c.textContent) === level) c.classList.add("active");
+            });
+
+            document.getElementById("vague-image").src = levelData.image_vague;
+            document.getElementById("tip1").textContent = levelData.tip[0];
+            document.getElementById("tip2").textContent = levelData.tip[1];
+            document.getElementById("tip3").textContent = levelData.tip[2];
+
+            if (!isReplay) {
+                document.querySelectorAll(".answer-box").forEach(b => { 
+                    b.textContent = ""; 
+                    b.classList.remove("incorrect", "correct", "correct-locked"); 
+                });
+                document.getElementById("sentence-input").value = "";
+                document.getElementById("feedback-container").innerHTML = "";
+                const confirmBtn = document.querySelector(".confirm-btn");
+                confirmBtn.textContent = "確認"; // 重置按鈕文字
+                renderCards(); 
+                setSentencePrompt(levelData);
+            }
+            updateConfirmButton();
+        }
+
+        function renderCards() {
+            const container = document.querySelector(".cards");
+            const taken = Array.from(document.querySelectorAll(".answer-box")).map(b => b.textContent.trim()).filter(w => w !== "");
+            container.innerHTML = "";
+            [...words].sort().forEach(word => {
+                if (taken.includes(word)) return;
+                const card = document.createElement("div");
+                card.className = "card";
+                card.textContent = word;
+                card.dataset.word = word;
+                container.appendChild(card);
+            });
+        }
+
+        function setSentencePrompt(levelData) {
+            const p = document.querySelector("#sentence p");
+            if (levelData?.sentence?.length > 0) {
+                currentSentencePrompt = levelData.sentence[Math.floor(Math.random() * levelData.sentence.length)];
+                p.innerHTML = `請用選擇的三個單字造一個句子 (${currentSentencePrompt})`;
+            }
+        }
+
+        function updateConfirmButton() {
+            const a1 = document.getElementById("answer1").textContent.trim();
+            const a2 = document.getElementById("answer2").textContent.trim();
+            const a3 = document.getElementById("answer3").textContent.trim();
+            const s = document.getElementById("sentence-input").value.trim();
+            
+            const isCardsFull = (a1 !== "" && a2 !== "" && a3 !== "");
+            document.querySelector(".submit-btn").classList.toggle("hidden", !isCardsFull);
+
+            const isSentenceReady = (s !== "");
+            document.querySelector(".confirm-btn").classList.toggle("hidden", !isSentenceReady);
+            // 移除舊 generate-image-btn 的顯示逻辑
+        }
+
+        function handleSubmitAnswer() {
+            const levelData = levelDataCache.find(item => item.level === currentLevel);
+            if (!levelData) return;
+            const userBoxes = [document.getElementById("answer1"), document.getElementById("answer2"), document.getElementById("answer3")];
+            const corrects = levelData.answer.map(w => w.toLowerCase());
+
+            userBoxes.forEach(box => {
+                const word = box.textContent.trim().toLowerCase();
+                box.classList.remove("incorrect", "correct", "correct-locked");
+                if (corrects.includes(word)) {
+                    box.classList.add("correct", "correct-locked"); 
+                } else if (word !== "") {
+                    box.classList.add("incorrect"); 
+                }
+            });
+        }
+
+        async function handleConfirm() {
+            // 如果次數已達 3 次回饋，執行生圖功能
+            if (feedbackCount >= 3) {
+                showModal();
+                return;
+            }
+
+            const levelData = levelDataCache.find(item => item.level === currentLevel);
+            if (!levelData) return;
+
+            const userBoxes = [document.getElementById("answer1"), document.getElementById("answer2"), document.getElementById("answer3")];
+            const userWords = userBoxes.map(b => b.textContent.trim().toLowerCase()).filter(w => w !== "");
+            const corrects = levelData.answer.map(w => w.toLowerCase());
+            const missing = corrects.filter(w => !userWords.includes(w));
+
+            const btn = document.querySelector(".confirm-btn");
+            const sentenceInput = document.getElementById("sentence-input");
+            
+            btn.disabled = true;
+            document.getElementById("feedback-container").innerHTML = "🤖 AI 老師正在閱卷並記錄學習進度...";
+
+            try {
+                const res = await fetch("/api/ai_feedback", {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        level: currentLevel, 
+                        missing_words: missing, 
+                        user_sentence: sentenceInput.value.trim(), 
+                        sentence_prompt: currentSentencePrompt, 
+                        correct_words: userWords,
+                        feedback_count: feedbackCount 
+                    })
+                });
+                const data = await res.json();
+                typeEffect('feedback-container', data.feedback, 30, () => {
+                    feedbackCount++; // 增加回饋計數
+                    btn.disabled = false;
+                    
+                    // 邏輯控制按鈕文字
+                    if (feedbackCount < 3) {
+                        btn.textContent = "再造一次";
+                    } else {
+                        btn.textContent = "生成圖片";
+                    }
+                    updateConfirmButton();
+                });
+            } catch (e) {
+                document.getElementById("feedback-container").innerHTML = "連線失敗。";
+                btn.disabled = false;
+            }
+        }
+
+        window.addEventListener("DOMContentLoaded", () => {
+            document.querySelector(".cards").addEventListener("click", e => {
+                if (!e.target.classList.contains("card")) return;
+                const emptyBox = [
+                    document.getElementById("answer1"),
+                    document.getElementById("answer2"),
+                    document.getElementById("answer3")
+                ].find(b => b.textContent.trim() === "");
+                
+                if (emptyBox) {
+                    emptyBox.textContent = e.target.dataset.word; 
+                    e.target.remove(); 
+                    updateConfirmButton(); 
+                }
+            });
+
+            document.querySelectorAll(".answer-box").forEach(box => {
+                box.addEventListener("click", () => {
+                    if (box.textContent === "" || box.classList.contains("correct-locked")) return;
+                    box.textContent = ""; 
+                    box.classList.remove("incorrect", "correct");
+                    renderCards(); 
+                    updateConfirmButton();
+                });
+            });
+
+            document.getElementById("sentence-input").addEventListener("input", () => {
+                // 修改句子時，不需要重置回饋次數，只需確認按鈕是否顯示
+                updateConfirmButton();
+            });
+
+            document.querySelector(".confirm-btn").addEventListener("click", handleConfirm);
+            document.querySelector(".submit-btn").addEventListener("click", handleSubmitAnswer); 
+            
+            // 移除舊 generate-image-btn 的事件監聽
+
+            document.getElementById("next-level-btn").addEventListener("click", () => { 
+                document.getElementById("image-modal").classList.remove("visible"); 
+                loadLevel(currentLevel + 1); 
+            });
+            
+            fetch("/static/data/easy_mode.json")
+                .then(res => res.json())
+                .then(data => { 
+                    levelDataCache = data; 
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const levelParam = urlParams.get('level');
+                    loadLevel(levelParam ? parseInt(levelParam) : 1);
+                });
+        });
+    </script>
+</body>
+</html>
